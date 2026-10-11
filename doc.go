@@ -1,12 +1,14 @@
 // Copyright 2026 Abhinav Gautam
 // SPDX-License-Identifier: Apache-2.0
 
-// Package knx is a KNXnet/IP client in pure Go: tunnelling to an IP
-// interface over UDP or TCP, KNX IP Secure tunnelling over TCP, routing
-// over multicast, gateway search and description, cEMI L_Data frames with
-// group value services, datapoint type (DPT) encoding, and import of ETS
-// project exports (.knxproj, including password-protected ones) and ETS
-// keyrings (.knxkeys).
+// Package knx is a KNXnet/IP client and router in pure Go: tunnelling to
+// an IP interface over UDP or TCP (link, raw and busmonitor layers), KNX
+// IP Secure tunnelling over TCP, routing over multicast with flow control,
+// plain or KNX IP Secure, KNX Data Secure group communication
+// ([DataSecure]), gateway search (also extended) and description, cEMI
+// L_Data frames with group value and management services, datapoint type
+// (DPT) encoding, and import of ETS project exports (.knxproj, including
+// password-protected ones) and ETS keyrings (.knxkeys).
 //
 // A connection is a [Tunnel] (from [DialTunnel]) or a [Router] (from
 // [ListenRouting]); both are a [Link]. Frames from the bus arrive on the
@@ -15,7 +17,7 @@
 //
 // The package does no logging and keeps no files: errors that do not end a
 // connection go to the OnError callback, and ETS files are passed in as
-// bytes. The simulator in the sim package is a gateway to test against.
+// bytes. The knx-sim module has a gateway and a router to test against.
 package knx
 
 import "context"

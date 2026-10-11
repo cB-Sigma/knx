@@ -14,6 +14,8 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // ETS keyring export (.knxkeys). An XML document whose Keyring root
@@ -47,6 +49,9 @@ type KeyringInterface struct {
 	UserID            int
 	Password          string
 	Authentication    string
+	// Groups are the secured group addresses this interface takes part
+	// in, each with the individual addresses that send to it.
+	Groups map[GroupAddress][]IndividualAddress
 }
 
 // KeyringDevice is one secure device from a keyring.
@@ -54,6 +59,11 @@ type KeyringDevice struct {
 	IndividualAddress  string
 	Authentication     string
 	ManagementPassword string
+	// ToolKey is the device's 16-byte tool key, when exported.
+	ToolKey []byte
+	// SequenceNumber is the last KNX Data Secure sequence number ETS knew
+	// for the device.
+	SequenceNumber uint64
 }
 
 // Keyring is a decrypted keyring.
@@ -62,10 +72,67 @@ type Keyring struct {
 	Interfaces []KeyringInterface
 	Devices    []KeyringDevice
 	// Backbone reports a secure routing backbone key; GroupKeys counts
-	// KNX Data Secure group keys. This package reports both and uses
-	// neither.
+	// KNX Data Secure group keys.
 	Backbone  bool
 	GroupKeys int
+	// BackboneKey is the 16-byte KNX IP Secure routing key, with the
+	// backbone's latency tolerance and multicast address (see
+	// RoutingOptions.Secure).
+	BackboneKey       []byte
+	BackboneLatency   time.Duration
+	BackboneMulticast string
+	// DataSecureKeys are the KNX Data Secure group keys by group address.
+	DataSecureKeys map[GroupAddress][]byte
+}
+
+// DataSecureSenders lists every individual address allowed to send secured
+// group frames (from the interfaces' group lists and the devices) with the
+// last sequence number the keyring knows for it (0 when it has none).
+func (k *Keyring) DataSecureSenders() map[IndividualAddress]uint64 {
+	out := map[IndividualAddress]uint64{}
+	for _, in := range k.Interfaces {
+		for _, senders := range in.Groups {
+			for _, s := range senders {
+				out[s] = 0
+			}
+		}
+	}
+	for _, d := range k.Devices {
+		if ia, err := ParseIndividualAddress(d.IndividualAddress); err == nil {
+			out[ia] = d.SequenceNumber
+		}
+	}
+	return out
+}
+
+// DataSecure builds a DataSecure from the keyring's group keys and senders.
+// With receiver set (an interface's individual address, such as the
+// tunnel's), only the groups of that interface are included.
+func (k *Keyring) DataSecure(receiver string) (*DataSecure, error) {
+	keys := map[GroupAddress][]byte{}
+	var allowed map[GroupAddress][]IndividualAddress
+	if receiver != "" {
+		for _, in := range k.Interfaces {
+			if in.IndividualAddress == receiver {
+				allowed = in.Groups
+			}
+		}
+		if allowed == nil {
+			return nil, fmt.Errorf("%w: the keyring has no interface %s with secured groups", ErrDataSecure, receiver)
+		}
+	}
+	for ga, key := range k.DataSecureKeys {
+		if allowed != nil {
+			if _, ok := allowed[ga]; !ok {
+				continue
+			}
+		}
+		keys[ga] = key
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("%w: the keyring has no group keys", ErrDataSecure)
+	}
+	return NewDataSecure(DataSecureOptions{GroupKeys: keys, Senders: k.DataSecureSenders()})
 }
 
 func keyringKey(password string) []byte {
@@ -162,6 +229,34 @@ func (c *keyringCrypt) password(b64 string) (string, error) {
 	return string(pt[8 : len(pt)-pad]), nil
 }
 
+// key decrypts a 16-byte key attribute (one AES block, no filler or
+// padding).
+func (c *keyringCrypt) key(b64 string) ([]byte, error) {
+	if b64 == "" {
+		return nil, nil
+	}
+	ct, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, err
+	}
+	if len(ct) != 16 {
+		return nil, fmt.Errorf("encrypted key of %d bytes, not 16", len(ct))
+	}
+	pt := make([]byte, 16)
+	cipher.NewCBCDecrypter(c.block, c.iv).CryptBlocks(pt, ct)
+	return pt, nil
+}
+
+// SealKeyringKey encrypts a 16-byte key as a keyring attribute (for
+// simulators and tests).
+func SealKeyringKey(keyringPassword, created string, key []byte) string {
+	b, _ := aes.NewCipher(keyringKey(keyringPassword))
+	iv := sha256.Sum256([]byte(created))
+	ct := make([]byte, 16)
+	cipher.NewCBCEncrypter(b, iv[:16]).CryptBlocks(ct, key[:16])
+	return base64.StdEncoding.EncodeToString(ct)
+}
+
 // SealKeyringPassword encrypts a password as a keyring attribute (for
 // simulators and tests); filler is the 8 leading bytes.
 func SealKeyringPassword(keyringPassword, created, value string, filler [8]byte) string {
@@ -204,13 +299,26 @@ func ParseKeyring(data []byte, password string) (*Keyring, error) {
 			UserID            string `xml:"UserID,attr"`
 			Password          string `xml:"Password,attr"`
 			Authentication    string `xml:"Authentication,attr"`
+			Groups            []struct {
+				Address string `xml:"Address,attr"`
+				Senders string `xml:"Senders,attr"`
+			} `xml:"Group"`
 		} `xml:"Interface"`
-		Backbone *struct{}  `xml:"Backbone"`
-		Groups   []struct{} `xml:"GroupAddresses>Group"`
-		Devices  []struct {
+		Backbone *struct {
+			Key              string `xml:"Key,attr"`
+			Latency          string `xml:"Latency,attr"`
+			MulticastAddress string `xml:"MulticastAddress,attr"`
+		} `xml:"Backbone"`
+		Groups []struct {
+			Address string `xml:"Address,attr"`
+			Key     string `xml:"Key,attr"`
+		} `xml:"GroupAddresses>Group"`
+		Devices []struct {
 			IndividualAddress  string `xml:"IndividualAddress,attr"`
 			Authentication     string `xml:"Authentication,attr"`
 			ManagementPassword string `xml:"ManagementPassword,attr"`
+			ToolKey            string `xml:"ToolKey,attr"`
+			SequenceNumber     string `xml:"SequenceNumber,attr"`
 		} `xml:"Devices>Device"`
 	}
 	if err := xml.Unmarshal(data, &doc); err != nil {
@@ -246,7 +354,52 @@ func ParseKeyring(data []byte, password string) (*Keyring, error) {
 		if ki.Authentication, err = c.password(in.Authentication); err != nil {
 			return nil, fmt.Errorf("interface %s authentication: %w", in.IndividualAddress, err)
 		}
+		for _, g := range in.Groups {
+			ga, err := keyringGroup(g.Address)
+			if err != nil {
+				return nil, fmt.Errorf("interface %s: %w", in.IndividualAddress, err)
+			}
+			if ki.Groups == nil {
+				ki.Groups = map[GroupAddress][]IndividualAddress{}
+			}
+			var senders []IndividualAddress
+			for _, s := range strings.Fields(g.Senders) {
+				ia, err := ParseIndividualAddress(s)
+				if err != nil {
+					return nil, fmt.Errorf("interface %s group %s: %w", in.IndividualAddress, ga, err)
+				}
+				senders = append(senders, ia)
+			}
+			ki.Groups[ga] = senders
+		}
 		k.Interfaces = append(k.Interfaces, ki)
+	}
+	if b := doc.Backbone; b != nil {
+		var err error
+		if k.BackboneKey, err = c.key(b.Key); err != nil {
+			return nil, fmt.Errorf("backbone key: %w", err)
+		}
+		if ms, err := strconv.Atoi(b.Latency); err == nil {
+			k.BackboneLatency = time.Duration(ms) * time.Millisecond
+		}
+		k.BackboneMulticast = b.MulticastAddress
+	}
+	for _, g := range doc.Groups {
+		ga, err := keyringGroup(g.Address)
+		if err != nil {
+			return nil, err
+		}
+		key, err := c.key(g.Key)
+		if err != nil {
+			return nil, fmt.Errorf("group %s key: %w", ga, err)
+		}
+		if key == nil {
+			continue
+		}
+		if k.DataSecureKeys == nil {
+			k.DataSecureKeys = map[GroupAddress][]byte{}
+		}
+		k.DataSecureKeys[ga] = key
 	}
 	for _, d := range doc.Devices {
 		kd := KeyringDevice{IndividualAddress: d.IndividualAddress}
@@ -257,9 +410,25 @@ func ParseKeyring(data []byte, password string) (*Keyring, error) {
 		if kd.ManagementPassword, err = c.password(d.ManagementPassword); err != nil {
 			return nil, fmt.Errorf("device %s management password: %w", d.IndividualAddress, err)
 		}
+		if kd.ToolKey, err = c.key(d.ToolKey); err != nil {
+			return nil, fmt.Errorf("device %s tool key: %w", d.IndividualAddress, err)
+		}
+		if d.SequenceNumber != "" {
+			kd.SequenceNumber, _ = strconv.ParseUint(d.SequenceNumber, 10, 64)
+		}
 		k.Devices = append(k.Devices, kd)
 	}
 	return k, nil
+}
+
+// keyringGroup reads a group address as a keyring writes it: a plain
+// number, or main/middle/sub.
+func keyringGroup(s string) (GroupAddress, error) {
+	ga, err := ParseGroupAddress(s)
+	if err != nil {
+		return 0, fmt.Errorf("keyring group address: %w", err)
+	}
+	return ga, nil
 }
 
 // Tunnel picks the secure tunnelling interface: the one at address when

@@ -47,6 +47,12 @@ def keyring(path, password):
             "auth": d.decrypted_authentication or "",
             "mgmt": d.decrypted_management_password or "",
         })
+    if k.backbone is not None:
+        out["backbone_key"] = (k.backbone.decrypted_key or b"").hex()
+        out["latency"] = k.backbone.latency or 0
+        out["multicast"] = k.backbone.multicast_address or ""
+    out["group_key_table"] = {str(ga.raw): key.hex() for ga, key in k.get_data_secure_group_keys().items()}
+    out["senders"] = {str(ia): seq for ia, seq in k.get_data_secure_senders().items()}
     return out
 
 

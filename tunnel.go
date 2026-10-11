@@ -35,6 +35,19 @@ type TunnelOptions struct {
 	OnFrame func(LData)
 	// OnError receives protocol problems worth logging.
 	OnError func(error)
+	// Layer asks for another tunnelling layer: LayerBusmonitor (every
+	// frame on the medium, as L_Busmon.ind to OnBusmon; nothing can be
+	// sent) or LayerRaw (raw frames to OnCEMI). Zero is the link layer.
+	Layer byte
+	// OnBusmon receives L_Busmon.ind frames on a busmonitor tunnel.
+	OnBusmon func(Busmon)
+	// OnCEMI receives every cEMI frame from the gateway as it arrived,
+	// before it is decoded (raw tunnels, logging).
+	OnCEMI func([]byte)
+	// DataSecure seals frames to secured group addresses with the tunnel's
+	// individual address as the source, and opens secured frames received
+	// (KNX Data Secure). Frames it refuses go to OnError.
+	DataSecure *DataSecure
 }
 
 // Tunnel is a KNXnet/IP tunnelling connection (link layer) to a gateway.
@@ -180,7 +193,7 @@ func (t *Tunnel) connect(ctx context.Context) error {
 	} else if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	fr, err := t.exchange(ctx, ConnectRequest{Control: t.local, Data: t.local}.Frame(), SvcConnectResponse)
+	fr, err := t.exchange(ctx, ConnectRequest{Control: t.local, Data: t.local, Layer: t.opts.Layer}.Frame(), SvcConnectResponse)
 	if err != nil {
 		return fmt.Errorf("knx: connecting to the gateway: %w", err)
 	}
@@ -341,6 +354,15 @@ func (t *Tunnel) onTunnelRequest(body []byte, from *net.UDPAddr) {
 }
 
 func (t *Tunnel) deliverCEMI(cemi []byte) {
+	if t.opts.OnCEMI != nil {
+		t.opts.OnCEMI(append([]byte(nil), cemi...))
+	}
+	if len(cemi) > 0 && cemi[0] == LBusmonInd {
+		if m, err := ParseBusmon(cemi); err == nil && t.opts.OnBusmon != nil {
+			t.opts.OnBusmon(m)
+		}
+		return
+	}
 	f, err := ParseLData(cemi)
 	if err != nil {
 		if !errors.Is(err, ErrNotLData) {
@@ -348,7 +370,28 @@ func (t *Tunnel) deliverCEMI(cemi []byte) {
 		}
 		return
 	}
-	if f.Code == LDataCon && f.GroupTarget {
+	if ds := t.opts.DataSecure; ds != nil && f.APCI == SecureService {
+		if f.Code == LDataCon {
+			// Our own frame confirmed: open it without the sender check.
+			ds.mu.Lock()
+			key := ds.keys[f.Group()]
+			ds.mu.Unlock()
+			if key != nil && f.GroupTarget {
+				if p, _, err := OpenData(key, f); err == nil {
+					f = p
+				}
+			}
+		} else if f, err = ds.Open(f); err != nil {
+			t.report(err)
+			return
+		}
+	} else if ds != nil && f.Code != LDataCon {
+		if f, err = ds.Open(f); err != nil {
+			t.report(err)
+			return
+		}
+	}
+	if f.Code == LDataCon {
 		t.mu.Lock()
 		ch := t.cons[f.Group()]
 		t.mu.Unlock()
@@ -424,6 +467,18 @@ func (t *Tunnel) checkState(ctx context.Context) error {
 // then the L_Data.con for the destination.
 func (t *Tunnel) Send(ctx context.Context, f LData) error {
 	f.Code = LDataReq
+	if t.opts.Layer == LayerBusmonitor {
+		return errors.New("knx: a busmonitor tunnel cannot send")
+	}
+	if ds := t.opts.DataSecure; ds != nil {
+		if f.Source == 0 {
+			f.Source = t.Address
+		}
+		var err error
+		if f, err = ds.Seal(f); err != nil {
+			return err
+		}
+	}
 	g := f.Group()
 	con := make(chan LData, 1)
 	t.sendMu.Lock()

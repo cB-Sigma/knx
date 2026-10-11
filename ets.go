@@ -54,7 +54,7 @@ var ErrProjectPassword = errors.New("the ETS project is password-protected and n
 // ParseETSProject reads a .knxproj export, or a bare 0.xml.
 func ParseETSProject(data []byte, password string) (*ETSProject, error) {
 	if !bytes.HasPrefix(data, []byte("PK")) {
-		return parseProjectXML(data)
+		return parseProjectXML(data, nil)
 	}
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -83,7 +83,7 @@ func ParseETSProject(data []byte, password string) (*ETSProject, error) {
 		if err != nil {
 			return nil, err
 		}
-		return parseProjectXML(b)
+		return parseProjectXML(b, files)
 	}
 	inner := files[id+".zip"]
 	if inner == nil {
@@ -114,7 +114,7 @@ func ParseETSProject(data []byte, password string) (*ETSProject, error) {
 		if err != nil {
 			return nil, err
 		}
-		return parseProjectXML(x)
+		return parseProjectXML(x, files)
 	}
 	return nil, errors.New("the protected project has no 0.xml")
 }
@@ -172,9 +172,13 @@ type comObject struct {
 	dpt         string
 	read, write *bool
 	links       []string
+	// From the device instance, to look the object up in the product
+	// catalogue when 0.xml leaves its type or flags out.
+	refID, product, h2p string
+	size                string // ObjectSize, such as "1 Bit"
 }
 
-func parseProjectXML(data []byte) (*ETSProject, error) {
+func parseProjectXML(data []byte, files map[string]*zip.File) (*ETSProject, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	dec.Strict = false
 	p := &ETSProject{}
@@ -183,6 +187,7 @@ func parseProjectXML(data []byte) (*ETSProject, error) {
 	byRef := map[string]int{}
 	var objs []*comObject
 	var cur *comObject
+	var devProduct, devH2P string
 	sawProject := false
 	for {
 		tok, err := dec.Token()
@@ -222,8 +227,13 @@ func parseProjectXML(data []byte) (*ETSProject, error) {
 					byRef[gaRef(id)] = len(p.GroupAddresses)
 				}
 				p.GroupAddresses = append(p.GroupAddresses, g)
+			case "DeviceInstance":
+				devProduct, _ = attr(t, "ProductRefId")
+				devH2P, _ = attr(t, "Hardware2ProgramRefId")
 			case "ComObjectInstanceRef":
-				cur = &comObject{}
+				cur = &comObject{product: devProduct, h2p: devH2P}
+				cur.refID, _ = attr(t, "RefId")
+				cur.size, _ = attr(t, "ObjectSize")
 				d, _ := attr(t, "DatapointType")
 				cur.dpt = firstDPT(d)
 				cur.read = flag(attr(t, "ReadFlag"))
@@ -250,6 +260,16 @@ func parseProjectXML(data []byte) (*ETSProject, error) {
 				}
 			case "ComObjectInstanceRef":
 				cur = nil
+			case "DeviceInstance":
+				devProduct, devH2P = "", ""
+			}
+		}
+	}
+	if files != nil {
+		cat := &catalogue{files: files, hw: map[string]map[string]string{}, apps: map[string]*appProgram{}}
+		for _, o := range objs {
+			if o.dpt == "" || o.read == nil || o.write == nil || o.size == "" {
+				cat.fill(o)
 			}
 		}
 	}
@@ -265,18 +285,51 @@ func parseProjectXML(data []byte) (*ETSProject, error) {
 			*dst = &b
 		}
 	}
+	linked := map[int][]DPT{}
 	for _, o := range objs {
+		dpt := o.dpt
+		if dpt == "" {
+			// No type anywhere: the object size names the 1-, 2- and
+			// 4-bit families (as xknxproject infers them).
+			switch o.size {
+			case "1 Bit":
+				dpt = "DPT-1"
+			case "2 Bit":
+				dpt = "DPT-2"
+			case "4 Bit":
+				dpt = "DPT-3"
+			}
+		}
 		for _, l := range o.links {
 			i, ok := byRef[gaRef(l)]
 			if !ok {
 				continue
 			}
 			g := &p.GroupAddresses[i]
-			if g.DPT == "" {
-				g.DPT = o.dpt
+			if d, err := ParseDPT(dpt); dpt != "" && (err == nil || errors.Is(err, ErrDPTRaw)) {
+				linked[i] = append(linked[i], d)
 			}
 			yes(&g.Read, o.read)
 			yes(&g.Write, o.write)
+		}
+	}
+	// A group address without its own type takes its linked objects' type
+	// when they agree, or their main number when only that is shared.
+	for i, ds := range linked {
+		g := &p.GroupAddresses[i]
+		if g.DPT != "" {
+			continue
+		}
+		same, sameMain := true, true
+		for _, d := range ds[1:] {
+			same = same && d == ds[0]
+			sameMain = sameMain && d.Main == ds[0].Main
+		}
+		switch {
+		case same && ds[0].Sub != 0:
+			g.DPT = fmt.Sprintf("DPST-%d-%d", ds[0].Main, ds[0].Sub)
+		case sameMain:
+			g.DPT = fmt.Sprintf("DPT-%d", ds[0].Main)
 		}
 	}
 	return p, nil

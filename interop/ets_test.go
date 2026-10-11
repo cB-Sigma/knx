@@ -4,18 +4,21 @@
 package interop
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os/exec"
 	"sort"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/cB-Sigma/knx"
 )
 
 // xknxImage holds xknx 3.20.0 and xknxproject 3.10.0 with the sample ETS
 // files of their test suites in /samples, built from ./xknx.
-const xknxImage = "sigma-knx-xknx:3.20.0"
+const xknxImage = "sigma-knx-xknx:3.20.0-r2"
 
 // sample returns a file of the image's /samples.
 func sample(t *testing.T, name string) []byte {
@@ -55,8 +58,13 @@ type xKeyring struct {
 		Auth string `json:"auth"`
 		Mgmt string `json:"mgmt"`
 	} `json:"devices"`
-	Backbone  bool `json:"backbone"`
-	GroupKeys int  `json:"group_keys"`
+	Backbone      bool              `json:"backbone"`
+	GroupKeys     int               `json:"group_keys"`
+	BackboneKey   string            `json:"backbone_key"`
+	Latency       int               `json:"latency"`
+	Multicast     string            `json:"multicast"`
+	GroupKeyTable map[string]string `json:"group_key_table"`
+	Senders       map[string]uint64 `json:"senders"`
 }
 
 // TestKeyringsAgainstXknx reads the keyrings ETS wrote for xknx's test
@@ -64,6 +72,7 @@ type xKeyring struct {
 // (type, address, host, user, decrypted password), every device
 // (authentication code, management password), the backbone and the
 // number of group keys; a wrong password is refused.
+// Covers: SIG-IPE-6706
 func TestKeyringsAgainstXknx(t *testing.T) {
 	needDocker(t, xknxImage, "xknx")
 	for _, tc := range []struct{ file, password string }{
@@ -72,6 +81,7 @@ func TestKeyringsAgainstXknx(t *testing.T) {
 		{"special_chars_secure_tunnel.knxkeys", "test"},
 		{"DataSecure_only_one_interface.knxkeys", "test"},
 		{"DataSecure_usb.knxkeys", "test"},
+		{"SecureTest.knxkeys", "test"},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			var want xKeyring
@@ -114,6 +124,27 @@ func TestKeyringsAgainstXknx(t *testing.T) {
 					t.Errorf("device %d: %+v\nxknx: %+v", i, d, w)
 				}
 			}
+			// v0.2.0: the secure routing and Data Secure material.
+			if got := hex.EncodeToString(k.BackboneKey); got != want.BackboneKey || int(k.BackboneLatency/time.Millisecond) != want.Latency || k.BackboneMulticast != want.Multicast {
+				t.Errorf("backbone %s %v %s; xknx %s %d %s", got, k.BackboneLatency, k.BackboneMulticast, want.BackboneKey, want.Latency, want.Multicast)
+			}
+			if len(k.DataSecureKeys) != len(want.GroupKeyTable) {
+				t.Errorf("%d group keys, xknx %d", len(k.DataSecureKeys), len(want.GroupKeyTable))
+			}
+			for ga, key := range k.DataSecureKeys {
+				if w := want.GroupKeyTable[strconv.Itoa(int(ga))]; w != hex.EncodeToString(key) {
+					t.Errorf("group %s key %x, xknx %s", ga, key, w)
+				}
+			}
+			senders := k.DataSecureSenders()
+			if len(senders) != len(want.Senders) {
+				t.Errorf("senders %v, xknx %v", senders, want.Senders)
+			}
+			for ia, seq := range senders {
+				if w, ok := want.Senders[ia.String()]; !ok || w != seq {
+					t.Errorf("sender %s %d, xknx %d (%v)", ia, seq, w, ok)
+				}
+			}
 			if _, err := knx.ParseKeyring(data, tc.password+"x"); err == nil {
 				t.Error("a wrong password was accepted")
 			}
@@ -135,8 +166,9 @@ type xProject struct {
 // TestProjectsAgainstXknxproject reads the projects ETS 4, 5 and 6 wrote
 // for xknxproject's test suite (plain and password-protected) with this
 // module and with xknxproject, and compares the group addresses: the
-// same set, the same names, and the same datapoint type wherever this
-// module reports one.
+// same set, the same names and the same datapoint types, including those
+// found only in the product catalogue (v0.2.0).
+// Covers: SIG-IPE-6710
 func TestProjectsAgainstXknxproject(t *testing.T) {
 	needDocker(t, xknxImage, "xknx")
 	for _, tc := range []struct{ file, password string }{
@@ -194,7 +226,10 @@ func TestProjectsAgainstXknxproject(t *testing.T) {
 				}
 			}
 			sort.Strings(inferred)
-			t.Logf("%d group addresses match xknxproject; %d without a DPT here that xknxproject has: %v", len(want.GroupAddresses), len(inferred), inferred)
+			if len(inferred) > 0 {
+				t.Errorf("%d group addresses without a DPT here that xknxproject has: %v", len(inferred), inferred)
+			}
+			t.Logf("%d group addresses match xknxproject", len(want.GroupAddresses))
 		})
 	}
 }

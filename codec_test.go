@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math"
 	"net"
 	"net/netip"
@@ -292,9 +293,71 @@ func TestKNXDatapointTypes(t *testing.T) {
 			t.Errorf("%s = %v, %v", s, d, err)
 		}
 	}
-	for _, s := range []string{"232.600", "x", "5.002"} {
+	for _, s := range []string{"242.600", "x", "10.002"} {
 		if _, err := knx.ParseDPT(s); err == nil {
 			t.Errorf("unsupported DPT %s accepted", s)
+		}
+	}
+}
+
+// The datapoint types added in v0.2.0 round-trip through their encodings
+// (worked from KNX Standard volume 3 part 7 section 2).
+// Covers: SIG-IPE-6700
+func TestKNXMoreDatapointTypes(t *testing.T) {
+	for _, tc := range []struct {
+		dpt string
+		v   any
+		raw string
+	}{
+		{"2.001", map[string]any{"control": true, "value": false}, "02"},
+		{"3.007", map[string]any{"control": true, "step": 3.0}, "0b"},
+		{"4.001", "A", "41"},
+		{"5.002", 17.0, "11"},
+		{"6.010", -5.0, "fb"},
+		{"7.003", 1230.0, "007b"}, // 10 ms steps
+		{"8.010", -12.34, "fb2e"}, // 0.01 % steps
+		{"8.001", -2.0, "fffe"},
+		{"10.001", "Tue 14:30:05", "4e1e05"},
+		{"10.001", "08:00:00", "080000"},
+		{"11.001", "2026-10-11", "0b0a1a"},
+		{"11.001", "1995-01-31", "1f015f"},
+		{"12.001", 4000000000.0, "ee6b2800"},
+		{"17.001", 12.0, "0c"},
+		{"18.001", map[string]any{"learn": true, "scene": 5.0}, "85"},
+		{"19.001", "2026-10-11T14:30:05", "7e0a0bee1e052000"},
+		{"21.001", 9.0, "09"},
+		{"29.010", -1000.0, "fffffffffffffc18"},
+		{"232.600", "#FF8000", "ff8000"},
+		{"251.600", "#10203040", "10203040000f"},
+	} {
+		d, err := knx.ParseDPT(tc.dpt)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.dpt, err)
+		}
+		raw, err := d.Encode(tc.v)
+		if err != nil || hex.EncodeToString(raw) != tc.raw {
+			t.Errorf("%s %v = %x, %v; want %s", tc.dpt, tc.v, raw, err, tc.raw)
+			continue
+		}
+		back, err := d.Decode(raw)
+		if err != nil {
+			t.Errorf("%s decode: %v", tc.dpt, err)
+			continue
+		}
+		if fmt.Sprint(back) != fmt.Sprint(tc.v) {
+			t.Errorf("%s decode %s = %v, want %v", tc.dpt, tc.raw, back, tc.v)
+		}
+	}
+	for _, tc := range []struct {
+		dpt string
+		v   any
+	}{
+		{"2.001", 4.0}, {"3.007", map[string]any{"control": true, "step": 9.0}}, {"6.001", 200.0}, {"8.001", 40000.0},
+		{"10.001", "25:00:00"}, {"11.001", "2100-01-01"}, {"17.001", 64.0}, {"232.600", "#FFF"}, {"4.001", "AB"},
+	} {
+		d, _ := knx.ParseDPT(tc.dpt)
+		if raw, err := d.Encode(tc.v); err == nil {
+			t.Errorf("%s accepted %v as % x", tc.dpt, tc.v, raw)
 		}
 	}
 }

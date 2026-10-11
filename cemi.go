@@ -17,6 +17,12 @@ const (
 	LDataReq byte = 0x11
 	LDataCon byte = 0x2E
 	LDataInd byte = 0x29
+	// LBusmonInd carries a raw frame seen on the medium (busmonitor tunnels).
+	LBusmonInd byte = 0x2B
+	// LRawReq, LRawCon and LRawInd carry raw frames (raw tunnels).
+	LRawReq byte = 0x10
+	LRawCon byte = 0x2F
+	LRawInd byte = 0x2D
 )
 
 // Application-layer services on group addresses (10-bit APCI values).
@@ -25,6 +31,62 @@ const (
 	GroupValueResponse uint16 = 0x040
 	GroupValueWrite    uint16 = 0x080
 )
+
+// Application-layer services on individual addresses and broadcasts
+// (KNX Standard volume 3 part 3 clause 7, application layer). The four-bit
+// services carry six bits of data in the APCI octet (Short); the ones from
+// 0x3C0 up use all ten bits and carry their data after it.
+const (
+	IndividualAddressWrite    uint16 = 0x0C0
+	IndividualAddressRead     uint16 = 0x100
+	IndividualAddressResponse uint16 = 0x140
+	ADCRead                   uint16 = 0x180
+	ADCResponse               uint16 = 0x1C0
+	MemoryRead                uint16 = 0x200
+	MemoryResponse            uint16 = 0x240
+	MemoryWrite               uint16 = 0x280
+	UserMessage               uint16 = 0x2C0
+	DeviceDescriptorRead      uint16 = 0x300
+	DeviceDescriptorResponse  uint16 = 0x340
+	Restart                   uint16 = 0x380
+	Escape                    uint16 = 0x3C0
+
+	AuthorizeRequest              uint16 = 0x3D1
+	AuthorizeResponse             uint16 = 0x3D2
+	KeyWrite                      uint16 = 0x3D3
+	KeyResponse                   uint16 = 0x3D4
+	PropertyValueRead             uint16 = 0x3D5
+	PropertyValueResponse         uint16 = 0x3D6
+	PropertyValueWrite            uint16 = 0x3D7
+	PropertyDescriptionRead       uint16 = 0x3D8
+	PropertyDescriptionResponse   uint16 = 0x3D9
+	IndividualAddressSerialRead   uint16 = 0x3DC
+	IndividualAddressSerialResp   uint16 = 0x3DD
+	IndividualAddressSerialWrite  uint16 = 0x3DE
+	DomainAddressWrite            uint16 = 0x3E0
+	DomainAddressRead             uint16 = 0x3E1
+	DomainAddressResponse         uint16 = 0x3E2
+	FunctionPropertyCommand       uint16 = 0x2C7
+	FunctionPropertyStateRead     uint16 = 0x2C8
+	FunctionPropertyStateResponse uint16 = 0x2C9
+	// SecureService is the APCI of KNX Data Secure (S-A_Data and the sync
+	// services); see DataSecure.
+	SecureService uint16 = 0x3F1
+)
+
+// Transport-layer control (TPCI) octet values for point-to-point use.
+const (
+	TPCIDataIndividual byte = 0x00 // T_Data_Individual (connectionless)
+	TPCIConnect        byte = 0x80 // T_Connect
+	TPCIDisconnect     byte = 0x81 // T_Disconnect
+	TPCINumbered       byte = 0x40 // T_Data_Connected: OR the sequence number << 2
+	TPCIAck            byte = 0xC2 // T_ACK: OR the sequence number << 2
+	TPCINak            byte = 0xC3 // T_NAK: OR the sequence number << 2
+)
+
+// apciLong reports a ten-bit service: escape-class codes and the user
+// message codes other than the plain 0x2C0 class carry all ten bits.
+func apciLong(top uint16) bool { return top == Escape || top == UserMessage }
 
 // Control field 1 bits.
 const (
@@ -151,7 +213,64 @@ func (f LData) Value() []byte {
 	return f.Data
 }
 
-// Encode writes the cEMI frame.
+// IndividualFrame builds a connectionless point-to-point L_Data frame (an
+// individual destination, T_Data_Individual) for a management service such
+// as DeviceDescriptorRead or PropertyValueRead. For the four-bit services
+// short carries the six data bits in the APCI octet (for example the
+// descriptor type of DeviceDescriptorRead); data follows the APCI.
+func IndividualFrame(code byte, dest IndividualAddress, apci uint16, short byte, data []byte) LData {
+	f := LData{Code: code, Ctrl1: ctrl1Standard | ctrl1NoRepeat | ctrl1Broadcast | ctrl1PrioLow,
+		Ctrl2: ctrl2DefaultHops, Dest: uint16(dest), APCI: apci, TPCI: TPCIDataIndividual}
+	if !apciLong(apci&0x3C0) && len(data) == 0 {
+		f.IsShort, f.Short = true, short&0x3F
+	} else {
+		if !apciLong(apci & 0x3C0) {
+			f.APCI = apci&0x3C0 | uint16(short&0x3F)
+		}
+		f.Data = append([]byte(nil), data...)
+	}
+	return f
+}
+
+// ControlFrame builds a transport-layer control frame to an individual
+// address: T_Connect, T_Disconnect, or T_ACK / T_NAK with the sequence
+// number OR-ed in (TPCIAck | seq<<2).
+func ControlFrame(code byte, dest IndividualAddress, tpci byte) LData {
+	return LData{Code: code, Ctrl1: ctrl1Standard | ctrl1NoRepeat | ctrl1Broadcast | ctrl1PrioLow,
+		Ctrl2: ctrl2DefaultHops, Dest: uint16(dest), TPCI: tpci}
+}
+
+// Control reports a transport-layer control frame (no application data).
+func (f LData) Control() bool { return f.TPCI&0x80 != 0 }
+
+// Individual returns the destination as an individual address.
+func (f LData) Individual() IndividualAddress { return IndividualAddress(f.Dest) }
+
+// Extended reports an extended frame (more than 15 octets of TPDU after the
+// TPCI octet, or flagged so in control field 1).
+func (f LData) Extended() bool { return f.Ctrl1&ctrl1Standard == 0 }
+
+// apdu is the TPCI octet, the APCI and the data, as the frame carries them.
+func (f LData) apdu() []byte {
+	if f.Control() {
+		return []byte{f.TPCI}
+	}
+	apdu := []byte{f.TPCI&0xFC | byte(f.APCI>>8)&0x03, byte(f.APCI)}
+	switch {
+	case f.IsShort:
+		apdu[1] |= f.Short & 0x3F
+	case apciLong(f.APCI & 0x3C0):
+		apdu = append(apdu, f.Data...)
+	default:
+		apdu[1] |= f.Short & 0x3F
+		apdu = append(apdu, f.Data...)
+	}
+	return apdu
+}
+
+// Encode writes the cEMI frame. A frame whose TPDU does not fit a standard
+// frame (more than 15 octets after the TPCI octet) is sent as an extended
+// frame.
 func (f LData) Encode() []byte {
 	b := []byte{f.Code, byte(len(f.AddInfo))}
 	b = append(b, f.AddInfo...)
@@ -159,15 +278,14 @@ func (f LData) Encode() []byte {
 	if f.GroupTarget {
 		ctrl2 |= ctrl2GroupDest
 	}
-	b = append(b, f.Ctrl1, ctrl2)
+	apdu := f.apdu()
+	ctrl1 := f.Ctrl1
+	if len(apdu)-1 > 15 {
+		ctrl1 &^= ctrl1Standard
+	}
+	b = append(b, ctrl1, ctrl2)
 	b = binary.BigEndian.AppendUint16(b, uint16(f.Source))
 	b = binary.BigEndian.AppendUint16(b, f.Dest)
-	apdu := []byte{f.TPCI&0xFC | byte(f.APCI>>8)&0x03, byte(f.APCI)}
-	if f.IsShort {
-		apdu[1] |= f.Short & 0x3F
-	} else {
-		apdu = append(apdu, f.Data...)
-	}
 	b = append(b, byte(len(apdu)-1)) // octets after the TPCI octet
 	return append(b, apdu...)
 }
@@ -203,16 +321,67 @@ func ParseLData(b []byte) (LData, error) {
 		return f, fmt.Errorf("cemi: length says %d octets after TPCI, only %d present", n, len(apdu)-1)
 	}
 	apdu = apdu[:n+1]
-	f.TPCI = apdu[0] & 0xFC
 	if n == 0 {
 		// A bare TPCI (transport control, no application data).
+		f.TPCI = apdu[0]
 		return f, nil
 	}
-	f.APCI = uint16(apdu[0]&0x03)<<8 | uint16(apdu[1]&0xC0)
+	f.TPCI = apdu[0] & 0xFC
+	top := uint16(apdu[0]&0x03)<<8 | uint16(apdu[1]&0xC0)
+	if apciLong(top) {
+		// Ten-bit service: the whole APCI, data after it.
+		f.APCI = uint16(apdu[0]&0x03)<<8 | uint16(apdu[1])
+		f.Data = append([]byte(nil), apdu[2:]...)
+		return f, nil
+	}
+	f.APCI = top
 	if n == 1 {
 		f.IsShort, f.Short = true, apdu[1]&0x3F
 	} else {
 		f.Data = append([]byte(nil), apdu[2:]...)
+		if top != GroupValueResponse && top != GroupValueWrite && top != GroupValueRead {
+			// Point-to-point services keep their six low bits (a count, a
+			// channel, a descriptor type) next to the data.
+			f.Short = apdu[1] & 0x3F
+		}
 	}
 	return f, nil
+}
+
+// Busmon is an L_Busmon.ind: a frame as seen on the medium, with its
+// status and timestamp from the additional information when present.
+type Busmon struct {
+	AddInfo []byte
+	// Raw is the frame as on the medium (TP1: control field to checksum).
+	Raw []byte
+	// Status is the busmonitor status octet (additional information type
+	// 0x03), Timestamp the relative timestamp (type 0x04), when present.
+	Status    byte
+	Timestamp uint16
+}
+
+// ParseBusmon decodes an L_Busmon.ind cEMI frame.
+func ParseBusmon(b []byte) (Busmon, error) {
+	if len(b) < 2 || b[0] != LBusmonInd {
+		return Busmon{}, errors.New("cemi: not an L_Busmon.ind frame")
+	}
+	ai := int(b[1])
+	if len(b) < 2+ai {
+		return Busmon{}, errors.New("cemi: L_Busmon.ind too short")
+	}
+	m := Busmon{AddInfo: append([]byte(nil), b[2:2+ai]...), Raw: append([]byte(nil), b[2+ai:]...)}
+	for x := m.AddInfo; len(x) >= 2; {
+		typ, n := x[0], int(x[1])
+		if len(x) < 2+n {
+			break
+		}
+		switch {
+		case typ == 0x03 && n == 1:
+			m.Status = x[2]
+		case typ == 0x04 && n == 2:
+			m.Timestamp = binary.BigEndian.Uint16(x[2:4])
+		}
+		x = x[2+n:]
+	}
+	return m, nil
 }

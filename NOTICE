@@ -22,12 +22,24 @@ PROVENANCE.md for what was read):
   names no copyright holder):xknx/secure/security_primitives.py and
   examples/ip_secure_calculations.py (KNX IP Secure key derivation,
   handshake MACs and the secure wrapper), xknx/secure/keyring.py (the
-  keyring's key derivation, IV, password padding and signature). The KNX
-  IP Secure test vectors in secure_test.go are the example values of
-  examples/ip_secure_calculations.py, used under its MIT licence.
+  keyring's key derivation, IV, password padding and signature, and from
+  v0.2.0 its backbone, group key and sender elements),
+  xknx/io/routing.py (routing flow control), xknx/io/ip_secure.py and
+  xknx/knxip/timer_notify.py (KNX IP Secure routing and its timer),
+  xknx/secure/data_secure.py and data_secure_asdu.py (KNX Data Secure).
+  The KNX IP Secure test vectors in secure_test.go are the example values
+  of examples/ip_secure_calculations.py; the TIMER_NOTIFY vectors in
+  routing_test.go come from test/io_tests/secure_group_test.py, and the
+  Data Secure vectors in datasecure_test.go from
+  test/secure_tests/data_secure_test.py with keys of its ETS keyring
+  SecureTest.knxkeys; all used under xknx's MIT licence.
 - xknxproject (github.com/XKNX/xknxproject, GPL-2.0-only, the XKNX
   authors): xknxproject/zip/extractor.py and loader/project_loader.py
-  were read for facts only (the .knxproj archive layout, the ETS 6
+  and, from v0.2.0, loader/hardware_loader.py,
+  loader/application_program_loader.py, util.py, models.py and
+  combination/combination.py
+  were read for facts only (the .knxproj archive layout, the product
+  catalogue's program and group object references, the ETS 6
   project password derivation parameters, the 0.xml element and
   attribute names). Facts are not covered by its licence; no code,
   comment or structure of it is in this module.
@@ -47,7 +59,8 @@ in this repository or linked into the module:
 - knxd 0.14.54.1 (github.com/knxd/knxd, GPL-2.0, from Debian bookworm),
   as a KNXnet/IP tunnelling server.
 - xknx 3.20.0 (MIT) and xknxproject 3.10.0 (GPL-2.0-only), from PyPI, to
-  read ETS files; interop/xknx/peer.py, which drives them, is ours
+  read ETS files and, with xknx, as the other KNX IP router;
+  interop/xknx/peer.py and routing.py, which drive them, are ours
   (Apache-2.0).
 - The sample keyrings of xknx's test suite and the sample projects of
   xknxproject's test suite (files written by ETS), fetched from their

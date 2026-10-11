@@ -37,6 +37,13 @@ xknxproject (interop/) were added.
 | ETS keyring (.knxkeys) (keyring.go) | none public | xknx (MIT): xknx/secure/keyring.py: the PBKDF2 parameters and salt of the keyring key, the IV from the Created attribute, the 8 filler bytes and padding around a password, and the signature's serialisation of the document |
 | ETS project (.knxproj) (ets.go) | the KNX XML project schema (KNX Association) | xknxproject (GPL-2.0-only): xknxproject/zip/extractor.py and loader/project_loader.py: the archive layout (P-xxxx folder, signature entry, inner P-xxxx.zip when protected), the ETS 6 project password derivation parameters, and the names of the 0.xml elements and attributes for group ranges, group addresses, datapoint types and group object links |
 | Protected project zips (etszip.go) | PKWARE APPNOTE section 6.1 (traditional "ZipCrypto" encryption); WinZip "AES Encryption Information" (AE-1/AE-2, extra field 0x9901, PBKDF2-HMAC-SHA1 keys, little-endian CTR, HMAC-SHA1 authentication) | none |
+| Routing flow control (routing.go, v0.2.0) | KNX Standard v2.1 volume 3 part 8 chapter 5 (routing: busy and lost-message frames, flow control) | xknx (MIT): xknx/io/routing.py (_RoutingFlowControl): the 20ms pacing, the busy counter's 10ms, 50ms, 100ms and 5ms constants |
+| KNX IP Secure routing (securerouting.go, v0.2.0) | KNX Standard v2.1 volume 3 part 8 chapter 9 and AN159, as summarised publicly | xknx (MIT): xknx/io/ip_secure.py (SecureGroup, SecureSequenceTimer) and xknx/knxip/timer_notify.py: the TIMER_NOTIFY layout and MAC blocks, session id 0, the timer delay constants and the timer events (E1 to E9, E11) |
+| KNX Data Secure (datasecure.go, v0.2.0) | KNX Standard v2.1 volume 3 part 3 (secure application layer) and AN158, as summarised publicly | xknx (MIT): xknx/secure/data_secure.py and data_secure_asdu.py: the security control field, block 0 and counter 0 layouts, the 4-octet MAC, the sequence number start (milliseconds since 2018-01-05) and the sender table rules |
+| Keyring backbone, group keys and senders (keyring.go, v0.2.0) | none public | xknx (MIT): xknx/secure/keyring.py: Backbone, GroupAddresses/Group and Interface/Group elements, the key encryption (one AES block, no filler) and the sender table |
+| ETS product catalogue (etscatalogue.go, ets.go, v0.2.0) | the KNX XML project schema (KNX Association) | xknxproject (GPL-2.0-only): loader/hardware_loader.py, loader/application_program_loader.py, util.py (strip_module_instance), models.py and combination/combination.py: Hardware2Program to application program, ComObjectRef and ComObject, the reference id form, the object-size DPT inference and the agreement rule for linked objects |
+| Extended search, busmonitor, management frames (frame.go, cemi.go, v0.2.0) | KNX Standard v2.1 volume 3 part 8 (core v2 extended search, SRP and DIB types; tunnelling layers) and part 3 (application layer service codes, transport control) | none recorded |
+| More datapoint types (dpt_more.go, v0.2.0) | KNX Standard v2.1 volume 3 part 7 section 2 | none recorded |
 | Interop peers (interop/) | knxd's command-line and knxtool usage; xknx's and xknxproject's public APIs, read to write interop/xknx/peer.py | the peers run in containers built from their own releases |
 
 An earlier review in SigmaM2M compared this module's tunnelling
@@ -55,10 +62,13 @@ taken from it, which its licence does not cover.
 | Test | Source |
 |---|---|
 | secure_test.go (TestKNXSecureVectors) | the example values of xknx's examples/ip_secure_calculations.py: the passwords "trustme" and "secret" and their derived keys, the X25519 keys, the SESSION_RESPONSE MAC, the SESSION_AUTHENTICATE frame, and the wrapped SESSION_AUTHENTICATE and SESSION_STATUS frames |
+| datasecure_test.go | the Data Secure frames of xknx 3.20.0's test/secure_tests/data_secure_test.py and the group keys, senders and sequence numbers of its keyring test/secure_tests/resources/SecureTest.knxkeys (password "test"), which ETS wrote |
+| routing_test.go (TestTimerNotifyVectors) | the backbone key and TIMER_NOTIFY MACs of xknx 3.20.0's test/io_tests/secure_group_test.py |
 | codec_test.go | frames and encodings worked from the KNX Standard clauses each test names |
 | example_test.go | a hand-written 0.xml and demo values |
 | interop/ets_test.go | keyrings and projects written by ETS, from the test suites of xknx 3.20.0 and xknxproject 3.10.0, fetched when the test image is built; xknx and xknxproject read the same files for comparison |
 | interop/knxd_test.go | knxd 0.14.54.1 and knxtool as the gateway and another bus device |
+| interop/routing_test.go | xknx 3.20.0 as the other router (interop/xknx/routing.py, ours, drives it) with the keyring SecureTest.knxkeys of its test suite; interop/routepeer is this module
 
 The tests that drive the simulated gateway (tunnelling, KNX IP Secure,
 ETS import of generated files) are in knx-sim.

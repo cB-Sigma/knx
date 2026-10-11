@@ -43,10 +43,13 @@ func ParseDPT(s string) (DPT, error) {
 	}
 	d := DPT{Main: m, Sub: sub}
 	if !d.Supported() {
-		return d, fmt.Errorf("%w: %s (decoded: 1.x, 5.001, 5.003, 5.004, 5.010, 7.x, 9.x, 13.x, 14.x, 16.000, 16.001, 20.x)", ErrDPTRaw, d)
+		return d, fmt.Errorf("%w: %s (decoded: %s)", ErrDPTRaw, d, DecodedDPTs)
 	}
 	return d, nil
 }
+
+// DecodedDPTs lists the datapoint types this package encodes and decodes.
+const DecodedDPTs = "1.x, 2.x, 3.x, 4.x, 5.x, 6.x, 7.x, 8.x, 9.x, 10.001, 11.001, 12.x, 13.x, 14.x, 16.000, 16.001, 17.001, 18.001, 19.001, 20.x, 21.x, 29.x, 232.600, 251.600"
 
 // ErrDPTRaw is ParseDPT's error for a well-formed datapoint type this
 // package does not decode; the DPT it returns with it still works, with
@@ -56,14 +59,12 @@ var ErrDPTRaw = errors.New("datapoint type not decoded; its values are raw hex")
 // Supported reports whether this package encodes the DPT.
 func (d DPT) Supported() bool {
 	switch d.Main {
-	case 1, 7, 9, 13, 14, 20:
+	case 1, 5, 7, 9, 13, 14, 20:
 		return true
-	case 5:
-		return d.Sub == 1 || d.Sub == 3 || d.Sub == 4 || d.Sub == 10
 	case 16:
 		return d.Sub == 0 || d.Sub == 1
 	}
-	return false
+	return moreSupported(d)
 }
 
 // Short reports whether the value travels in the 6 bits of the APCI octet
@@ -100,6 +101,9 @@ func (d DPT) Decode(b []byte) (any, error) {
 	if !d.Supported() {
 		return strings.ToUpper(hex.EncodeToString(b)), nil
 	}
+	if _, ok := moreMains[d.Main]; ok {
+		return decodeMore(d, b)
+	}
 	need := map[int]int{1: 1, 5: 1, 7: 2, 9: 2, 13: 4, 14: 4, 16: 14, 20: 1}[d.Main]
 	if len(b) < need {
 		return nil, fmt.Errorf("DPT %s needs %d data bytes, got %d", d, need, len(b))
@@ -117,7 +121,7 @@ func (d DPT) Decode(b []byte) (any, error) {
 			return float64(b[0]), nil
 		}
 	case 7:
-		return float64(binary.BigEndian.Uint16(b)), nil
+		return scaled(d, float64(binary.BigEndian.Uint16(b))), nil
 	case 9:
 		return DecodeFloat16(binary.BigEndian.Uint16(b))
 	case 13:
@@ -157,6 +161,9 @@ func (d DPT) Encode(v any) ([]byte, error) {
 			}
 		}
 		return nil, fmt.Errorf("DPT %s is sent raw: give the value as hex, such as \"0A\", or a number 0 to 255", d)
+	}
+	if _, ok := moreMains[d.Main]; ok {
+		return encodeMore(d, v)
 	}
 	switch d.Main {
 	case 1:
@@ -225,6 +232,7 @@ func (d DPT) Encode(v any) ([]byte, error) {
 		}
 		return []byte{byte(raw)}, nil
 	case 7:
+		f = unscaled(d, f)
 		if f < 0 || f > math.MaxUint16 || f != math.Trunc(f) {
 			return nil, fmt.Errorf("DPT %s: %v: %w", d, v, errRange)
 		}

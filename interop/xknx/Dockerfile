@@ -8,7 +8,7 @@
 # ETS wrote, are copied into /samples; nothing of them is kept in this
 # repository.
 #
-#   docker build -t sigma-knx-xknx:3.20.0 .
+#   docker build -t sigma-knx-xknx:3.20.0-r2 .
 
 FROM python:3.12-slim
 RUN apt-get update \
@@ -22,5 +22,5 @@ RUN apt-get update \
  && cp /tmp/xknxproject/test/resources/*.knxproj /samples/ \
  && cp -r /tmp/xknxproject/test/resources/stubs /samples/stubs \
  && rm -rf /tmp/xknx /tmp/xknxproject
-COPY peer.py /peer.py
+COPY peer.py routing.py /
 ENTRYPOINT ["python3", "/peer.py"]
