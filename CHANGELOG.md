@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Fixed:
+
+- A plain (non-secure) router ignores its own datagrams looped back by
+  the multicast group, as a secure router already did: its own
+  ROUTING_BUSY no longer pauses its `Send`, is not counted by `Busy` and
+  is not reported to `OnBusy`, and its own indications do not reach
+  `OnFrame`. Own datagrams are told by the send socket's port at one of
+  the host's addresses. Reported by @boeboe (#1).
+
 ## v0.2.0 (2026-10-11)
 
 Added:

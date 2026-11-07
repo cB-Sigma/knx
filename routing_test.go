@@ -9,7 +9,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"net"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -155,6 +157,86 @@ func TestRoutingFlowControl(t *testing.T) {
 	defer cancel()
 	if err := ra.Send(cctx, knx.GroupFrame(0, ga, knx.GroupValueWrite, []byte{1}, true)); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("send during busy pause: %v", err)
+	}
+}
+
+// A router ignores its own datagrams, which the multicast group loops back
+// to it (a unicast group that is its own address behaves the same): its
+// ROUTING_BUSY does not pause its Send, is not counted by Busy and is not
+// reported to OnBusy, and its indications do not reach OnFrame; a busy
+// frame from another socket on the same host still does all of that.
+func TestRoutingOwnEcho(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		group func(port string) knx.RoutingOptions
+	}{
+		{"multicast", func(port string) knx.RoutingOptions { return knx.RoutingOptions{Group: "224.0.23.12:" + port} }},
+		{"unicast to itself", func(port string) knx.RoutingOptions {
+			return knx.RoutingOptions{Group: "127.0.0.1:" + port, Listen: "127.0.0.1:" + port}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var busy, frames atomic.Int32
+			_, port, _ := net.SplitHostPort(udpPort(t))
+			o := tc.group(port)
+			o.OnBusy = func(knx.RoutingBusy) { busy.Add(1) }
+			o.OnFrame = func(knx.LData) { frames.Add(1) }
+			r, err := knx.ListenRouting(o)
+			if err != nil {
+				if strings.HasPrefix(tc.name, "multicast") {
+					t.Skip(err)
+				}
+				t.Fatal(err)
+			}
+			defer r.Close()
+			// Another sender on this host is heard.
+			to, _ := net.ResolveUDPAddr("udp4", o.Group)
+			c, err := net.DialUDP("udp4", nil, to)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			if _, err := c.Write(knx.RoutingBusy{WaitTime: 10 * time.Millisecond}.Frame().Encode()); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				if b, _ := r.Busy(); b == 1 {
+					break
+				}
+				if time.Now().After(deadline) {
+					if strings.HasPrefix(tc.name, "multicast") {
+						t.Skip("no multicast loopback on this host")
+					}
+					t.Fatal("another sender's ROUTING_BUSY not seen")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			time.Sleep(20 * time.Millisecond)
+			// The router's own busy frame does not throttle it.
+			if err := r.SendBusy(500 * time.Millisecond); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(20 * time.Millisecond) // let the echo arrive
+			ga, _ := knx.ParseGroupAddress("1/1/1")
+			start := time.Now()
+			if err := r.Send(context.Background(), knx.GroupFrame(0, ga, knx.GroupValueRead, nil, true)); err != nil {
+				t.Fatal(err)
+			}
+			if d := time.Since(start); d > 200*time.Millisecond {
+				t.Errorf("Send paused %v after the router's own ROUTING_BUSY", d)
+			}
+			time.Sleep(100 * time.Millisecond)
+			if b, _ := r.Busy(); b != 1 {
+				t.Errorf("Busy() = %d after the router's own ROUTING_BUSY, want 1", b)
+			}
+			if n := busy.Load(); n != 1 {
+				t.Errorf("OnBusy called %d times, want once (the other sender's)", n)
+			}
+			if n := frames.Load(); n != 0 {
+				t.Errorf("OnFrame called %d times for the router's own indication", n)
+			}
+		})
 	}
 }
 

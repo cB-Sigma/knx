@@ -27,7 +27,7 @@ KNX integration.
 | Busmonitor and raw tunnelling layers | yes (`TunnelOptions.Layer`, `OnBusmon`, `OnCEMI`, v0.2.0) |
 | KNX IP Secure tunnelling: session handshake, device authentication check, user authentication, secure wrapper with sequence and MAC checks, keepalive | yes |
 | Routing over multicast (or to a unicast peer) | yes |
-| Routing flow control: ROUTING_BUSY pauses sending (with the randomised back-off for repeated busy frames), ROUTING_LOST_MESSAGE reported, 20ms pacing; sending busy and lost frames | yes (v0.2.0) |
+| Routing flow control: ROUTING_BUSY pauses sending (with the randomised back-off for repeated busy frames), ROUTING_LOST_MESSAGE reported, 20ms pacing; sending busy and lost frames; a router's own looped-back datagrams ignored | yes (v0.2.0) |
 | KNX IP Secure routing: backbone key, wrapped frames, timer synchronisation (time keeper and follower, TIMER_NOTIFY, latency tolerance) | yes (`RoutingOptions.Secure`, v0.2.0) |
 | KNX Data Secure: S-A_Data with group keys, CCM encryption and authentication-only, per-sender sequence numbers, plain frames to secured groups refused; on tunnels and routing | yes (`DataSecure`, v0.2.0); point-to-point frames with a tool key and the sync services are refused, not handled |
 | cEMI L_Data: group value services; management services on individual addresses (descriptor, property, memory, address, ADC, restart, authorise, key, function property, domain address); transport control frames; extended frames; L_Busmon.ind | yes (v0.2.0); connection-oriented management sessions (T_Connect with numbered data and acks) are built from these frames by the caller |

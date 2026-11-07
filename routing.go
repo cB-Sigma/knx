@@ -81,6 +81,13 @@ type Router struct {
 	sec      *secureTimer
 	recent   [32]string
 	recentAt int
+
+	// self is the send socket's address; local lists this host's IPv4
+	// addresses (nil when they could not be read). Together they tell the
+	// router's own datagrams, looped back by the multicast group, from the
+	// other routers'.
+	self  *net.UDPAddr
+	local map[string]bool
 }
 
 // ListenRouting joins the routing group (or binds the unicast listen
@@ -153,6 +160,17 @@ func ListenRouting(o RoutingOptions) (*Router, error) {
 		}
 		r.tx = r.rx
 	}
+	r.self = r.tx.LocalAddr().(*net.UDPAddr)
+	if r.self.IP == nil || r.self.IP.IsUnspecified() {
+		if addrs, err := net.InterfaceAddrs(); err == nil {
+			r.local = map[string]bool{}
+			for _, a := range addrs {
+				if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil {
+					r.local[n.IP.To4().String()] = true
+				}
+			}
+		}
+	}
 	r.wg.Add(1)
 	go func() { defer r.wg.Done(); r.readLoop() }()
 	if r.sec != nil {
@@ -173,7 +191,7 @@ func (r *Router) report(err error) {
 func (r *Router) readLoop() {
 	buf := make([]byte, 1500)
 	for {
-		n, _, err := r.rx.ReadFromUDP(buf)
+		n, from, err := r.rx.ReadFromUDP(buf)
 		if err != nil {
 			r.mu.Lock()
 			if r.err == nil {
@@ -186,7 +204,7 @@ func (r *Router) readLoop() {
 			}
 			return
 		}
-		if r.sec != nil && r.ownEcho(buf[:n]) {
+		if r.ownEcho(from, buf[:n]) {
 			continue // our own datagram, looped back by the multicast group
 		}
 		fr, err := ParseFrame(buf[:n])
@@ -344,8 +362,19 @@ func (r *Router) writeRaw(f Frame) error {
 	return err
 }
 
-// ownEcho reports a datagram this router sent recently.
-func (r *Router) ownEcho(b []byte) bool {
+// ownEcho reports a datagram this router sent itself: one from the send
+// socket's own port at one of this host's addresses (the multicast group
+// loops every datagram back to its sender, and a router must not pause on
+// its own ROUTING_BUSY), or, on a secure backbone, one whose bytes it
+// wrote recently (wrapped frames are unique, so this also covers a sender
+// address the socket does not know).
+func (r *Router) ownEcho(from *net.UDPAddr, b []byte) bool {
+	if from != nil && from.Port == r.self.Port && r.ownIP(from.IP) {
+		return true
+	}
+	if r.sec == nil {
+		return false
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, s := range r.recent {
@@ -354,6 +383,19 @@ func (r *Router) ownEcho(b []byte) bool {
 		}
 	}
 	return false
+}
+
+// ownIP reports whether ip is the send socket's address or, when the
+// socket is bound to every address, one of this host's.
+func (r *Router) ownIP(ip net.IP) bool {
+	if r.self.IP != nil && !r.self.IP.IsUnspecified() {
+		return ip.Equal(r.self.IP)
+	}
+	if r.local == nil {
+		return true // the host's addresses are unknown: trust the port
+	}
+	ip4 := ip.To4()
+	return ip4 != nil && (ip4.IsLoopback() || r.local[ip4.String()])
 }
 
 // Send multicasts an L_Data.ind, after any busy pause and at least
